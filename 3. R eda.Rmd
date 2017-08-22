@@ -1,0 +1,446 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(feather)
+library(ggplot2)
+library(stringr)
+library(corrplot)
+library(tibble)
+library(treemap)
+```
+
+```{r}
+# Load Data ---------------------------------------------------------------
+# input_path <- "/media/tin/DATA/Kaggle/Instacart/Input/Original"
+# subset_path <- "/media/tin/DATA/Kaggle/Instacart/Input/Subset20000"
+
+# For Windows 
+input_path <- "D:\\Kaggle\\Instacart\\Input\\Original"
+subset_path <- "D:\\Kaggle\\Instacart\\Input\\Subset20000"
+
+rf <- function(x) {
+  read_feather(file.path(input_path, x))
+}
+
+subset_csv <- function(data, x) {
+  write.csv(data, file.path(subset_path, x), row.names = FALSE)
+}
+
+#subset 
+SUBSET = TRUE
+RECORD = TRUE
+
+# step 1
+order_products__prior <- rf("order_products__prior.feather")
+order_products__train <- rf("order_products__train.feather")
+orders <- rf("orders.feather")
+aisles <- rf("aisles.feather")
+products <- rf("products.feather")
+departments <- rf("departments.feather")
+
+orders$eval_set <- as.factor(orders$eval_set)
+aisles$aisle <- as.factor(aisles$aisle)
+departments$department <- as.factor(departments$department)
+products$product_name <- as.factor(products$product_name)
+
+
+```
+
+```{r}
+# For Qlik Sense
+name_count <- order_products__prior %>% 
+  group_by(product_id) %>% 
+  summarize(count = n()) %>% 
+  top_n(200, wt = count) %>%
+  left_join(select(products, product_id, product_name), by="product_id")
+
+write.csv(name_count, "name_count.csv", row.names = FALSE)
+```
+```{r}
+products <- products %>% 
+    mutate(organic=ifelse(str_detect(str_to_lower(products$product_name),'organic'),"organic","not organic"), organic= as.factor(organic))
+
+products_with_name <- 
+  order_products__prior %>%
+  left_join(products)
+
+write.csv(sample_frac(products_with_name, 0.1), "products_with_name.csv", row.names = FALSE)
+```
+
+```{r}
+orders %>% 
+  ggplot(aes(x=order_hour_of_day)) + 
+  geom_histogram(stat="count",fill="red")
+```
+
+```{r}
+orders %>% 
+  ggplot(aes(x=order_dow)) + 
+  geom_histogram(stat="count",fill="red")
+```
+
+```{r}
+order_products__prior %>% 
+  group_by(order_id) %>% 
+  summarize(n_items = last(add_to_cart_order)) %>%
+  ggplot(aes(x=n_items))+
+  geom_histogram(stat="count",fill="red") + 
+  geom_rug()+
+  coord_cartesian(xlim=c(0,80))
+```
+```{r}
+orders %>% 
+  ggplot(aes(x=days_since_prior_order)) + 
+  geom_histogram(stat="count",fill="red")
+```
+
+```{r}
+tmp <- products %>% group_by(department_id, aisle_id) %>% summarize(n=n())
+tmp <- tmp %>% left_join(departments,by="department_id")
+tmp <- tmp %>% left_join(aisles,by="aisle_id")
+
+tmp2<-order_products__prior %>% 
+  group_by(product_id) %>% 
+  summarize(count=n()) %>% 
+  left_join(products,by="product_id") %>% 
+  ungroup() %>% 
+  group_by(department_id,aisle_id) %>% 
+  summarize(sumcount = sum(count)) %>% 
+  left_join(tmp, by = c("department_id", "aisle_id")) %>% 
+  mutate(onesize = 1)
+```
+
+```{r}
+treemap(tmp2,index=c("department","aisle"),vSize="onesize",vColor="department",palette="Set3",title="",sortID="-sumcount", border.col="#FFFFFF",type="categorical", fontsize.legend = 0,bg.labels = "#FFFFFF")
+```
+
+```{r}
+if (SUBSET) {
+  user_list <- orders %>%
+    filter(eval_set == "train") %>%
+    select(user_id) %>%
+    distinct()
+  
+  set.seed(88)
+  user_subset = user_list[sample(nrow(user_list)),][1:20000, ]
+
+  orders <- user_subset %>% inner_join(orders)
+  
+  order_products__train <- orders %>%
+    filter(eval_set != "prior") %>%
+    select(order_id) %>%
+    inner_join(order_products__train)
+  
+  order_products__prior <- orders %>%
+    filter(eval_set == "prior") %>%
+    select(order_id) %>%
+    inner_join(order_products__prior)
+
+  rm(user_list, user_subset)
+}
+
+if (RECORD) {
+  subset_csv(orders, "orders.csv")
+  subset_csv(order_products__train, "order_products__train.csv")
+  subset_csv(order_products__prior, "order_products__prior.csv")
+}
+
+train_results <- order_products__train %>%
+  filter(reordered == 1) %>%
+  group_by(order_id) %>%
+  summarise(
+    products = paste(product_id, collapse = " ")
+  )
+
+train_none <- data.frame(
+  order_id = unique(order_products__train$order_id[!order_products__train$order_id 
+                                  %in% train_results$order_id]),
+  products = "None"
+)
+
+train_results <- train_results %>% bind_rows(train_none) %>% arrange(order_id)
+rm(train_none)
+
+filter_none <- train_results %>%
+  mutate(None = (train_results$products == 'None') * 1) %>%
+  select(-products)
+```
+
+```{r}
+
+```
+
+```{r}
+# step 2
+ordert <- order_products__train %>%
+  mutate(user_id = orders$user_id[match(order_products__train$order_id, orders$order_id)])
+
+p_a_d <- products %>% 
+  inner_join(aisles) %>% inner_join(departments)
+
+orderp <- orders %>% 
+  inner_join(order_products__prior, by = "order_id") %>%
+  inner_join(p_a_d, by = "product_id")
+
+rm(aisles, departments, products, p_a_d)
+rm(order_products__prior, order_products__train)
+
+```
+
+```{r}
+# step 3
+orderp <- orderp %>%
+  select(-aisle, -department, -product_name)
+
+# aisle
+aisle <- orderp %>%
+  group_by(aisle_id) %>%
+  summarise(
+    aisle_ave_dow = mean(order_dow), 
+    aisle_hour_of_day = mean(order_hour_of_day),
+    aisle_ave_dow_std = sd(order_dow), 
+    aisle_hour_of_day_std = sd(order_hour_of_day)
+  )
+
+# departments
+department <- orderp %>%
+  group_by(department_id) %>%
+  summarise(
+    department_ave_dow = mean(order_dow), 
+    department_hour_of_day = mean(order_hour_of_day),
+    department_ave_dow_std = sd(order_dow), 
+    department_hour_of_day_std = sd(order_hour_of_day)
+  )
+
+# products
+prd <- orderp %>%
+  arrange(user_id, order_number, product_id) %>%
+  group_by(user_id, product_id) %>%
+  mutate(product_time = row_number()) %>% #ranking, counter for times purchased
+  ungroup() %>%
+  group_by(product_id) %>% #by products, aggragate over all orders and all customers
+  summarise(
+    prod_orders = n(),
+    prod_reorders = sum(reordered),
+    prod_first_orders = sum(product_time == 1),
+    prod_second_orders = sum(product_time == 2),
+    prod_third_orders = sum(product_time == 3)
+  )
+
+prd <- prd %>%
+  mutate(prod_reorder_second = prod_second_orders / prod_first_orders) %>%
+  mutate(prod_reorder_times = 1 + prod_reorders / prod_first_orders) %>%
+  mutate(prod_reorder_third = prod_third_orders / prod_second_orders) %>%
+  select(-prod_reorders, -prod_first_orders, -prod_second_orders, -prod_third_orders)
+
+gc()
+
+# Users -------------------------------------------------------------------
+users <- orders %>%
+  filter(eval_set == "prior") %>%
+  group_by(user_id) %>%
+  summarise(
+    user_orders = max(order_number),
+    user_period = sum(days_since_prior_order, na.rm = T),
+    user_mean_days_since_prior = mean(days_since_prior_order, na.rm = T)
+  )
+
+us <- orderp %>%
+  group_by(user_id) %>%
+  summarise(
+    user_total_products = n(),
+    user_reorder_ratio = sum(reordered == 1) / sum(order_number > 1),
+    user_distinct_products = n_distinct(product_id)
+  )
+
+users <- users %>% 
+  inner_join(us) %>%
+  mutate(user_average_basket = user_total_products / user_orders)
+
+us <- orders %>%
+  filter(eval_set != "prior") %>%
+  select(user_id, order_id, eval_set,
+         time_since_last_order = days_since_prior_order,
+         order_dow, order_hour_of_day)  #additional
+
+users <- users %>% inner_join(us)
+# combine prior and train & test infomation for each user
+
+rm(us)
+gc()
+
+# Database ----------------------------------------------------------------
+product_candidates <- orderp %>%
+  group_by(user_id, department_id, aisle_id, product_id) %>% 
+  summarise(
+    up_orders = n(),
+    up_first_order = min(order_number),
+    up_last_order = max(order_number),
+    up_average_cart_position = mean(add_to_cart_order), # analyse sequence of purchased product
+    ave_dow = mean(order_dow),
+    ave_hour = mean(order_hour_of_day)) # additional features
+
+temp <- orderp %>%
+  filter(!is.na(days_since_prior_order)) %>%
+  group_by(user_id, product_id) %>% 
+  summarise(
+    ave_freq = mean(days_since_prior_order)
+  )
+
+product_candidates <- product_candidates %>%
+  left_join(temp, by = c("user_id", "product_id")) %>%
+  mutate(ave_freq = ifelse(is.na(ave_freq), 0, ave_freq))
+
+rm(orderp, orders, temp)
+```
+
+```{r}
+# New
+filter_none = filter_none %>%
+  inner_join(users, by = 'order_id')
+```
+
+```{r}
+filter_none %>%
+  filter(None == 1) %>%
+  count()
+```
+
+```{r}
+# Step 4 ----------------------------------------------------
+data <- product_candidates %>% 
+  inner_join(prd, by = "product_id") %>%
+  inner_join(users, by = "user_id") %>%
+  mutate(up_order_rate = up_orders / user_orders) %>%
+  mutate(up_orders_since_last_order = user_orders - up_last_order) %>%
+  mutate(up_order_rate_since_first_order = up_orders / 
+           (user_orders - up_first_order + 1)) %>%
+  left_join(ordert %>% select(user_id, product_id, reordered), 
+            by = c("user_id", "product_id"))
+
+data$reordered[is.na(data$reordered)] <- 0
+
+#bottleneck here
+data <- data %>%
+  mutate(prod_reorder_third = ifelse(is.na(prod_reorder_third), 0, prod_reorder_third))
+
+data <- data %>%
+  inner_join(aisle, by = "aisle_id") %>%
+  inner_join(department, by = "department_id")
+
+rm(ordert, prd, users, product_candidates)
+gc()
+```
+
+```{r}
+# Transfer to Python
+subset_path <- "/media/tin/DATA/Kaggle/Instacart/Input/Subset20000"
+
+wcsv <- function(data, x) {
+  write.csv(data, file.path(subset_path, x), row.names = F)
+}
+
+if (SUBSET) {
+  wcsv(data, "data_subset.csv")
+  wcsv(train_results, "data_subset_results.csv")
+  wcsv(filter_none, "filter_none.csv")
+  # rm(data)
+  # rm(train_results)
+  gc()
+}
+```
+
+```{r}
+# m <- as.data.frame(data) %>% select(-user_id, -product_id, -eval_set, -order_id, -reordered)
+# corrplot(as.matrix(cor(m)), tl.cex = 0.6)
+```
+
+```{r}
+# Step 5: Train / Test datasets ---------------------------------------------------
+train <- as.data.frame(data[data$eval_set == "train",]) %>%
+  select(-eval_set, -user_id, -product_id, -order_id)
+
+train$reordered[is.na(train$reordered)] <- 0
+
+test <- as.data.frame(data[data$eval_set == "test",]) %>%
+  select(-eval_set, -user_id, -reordered)
+
+rm(data)
+gc()
+```
+
+```{r}
+ggplot(test, aes(reordered)) +
+  geom_histogram(binwidth = 0.01) +
+  coord_cartesian(xlim = c(0, 0.05))
+```
+
+```{r}
+test %>%
+  filter(reordered > 0.01) %>%
+  count() %>%
+  mutate(frac = n/ nrow(test))
+```
+
+```{r}
+ggplot(test, aes(up_orders, reordered)) +
+  geom_point(alpha = 1/100)
+```
+
+```{r}
+ggplot(test, aes(up_orders, reordered)) +
+  geom_point() +
+  coord_flip()
+```
+```{r}
+ggplot(test, aes(up_orders, reordered)) +
+  geom_bin2d()
+```
+
+```{r}
+submi <- submission %>%
+  mutate(lengfdsf = ifelse(products == 'None', 0, (str_count(products, '\\s+') + 1)))
+
+ggplot(submi, aes(lengfdsf)) +
+  geom_histogram()
+```
+
+```{r}
+data %>%
+  ggplot(aes(user_distinct_products, user_total_products)) +
+  geom_point(alpha = 1/100)
+```
+
+```{r}
+data <- rf("train_subset.feather")
+
+plot(data$up_orders)
+
+data$reordered[is.na(data$reordered)] <- 0
+
+data %>%
+  filter(up_orders < 8) %>%
+  ggplot(aes(up_orders)) +
+  geom_histogram() 
+  # coord_cartesian(xlim = c(0, 10))
+
+data %>%
+  ggplot(aes(up_orders, department_id)) +
+  geom_point(alpha = 1/100) +
+  facet_wrap(~reordered)
+```
+
+
+
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
